@@ -1,8 +1,8 @@
+// pages/index.tsx
 import Head from "next/head";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
-import UpdateCodeModal from "@/components/UpdateCodeModal";
 
 type Establishment = {
   id: string;
@@ -14,20 +14,9 @@ type Establishment = {
   distance_km?: number;
   code?: string | null;
   code_updated_at?: string | null;
-  google_place_id?: string | null;
 };
 
-type Candidate = {
-  place_id?: string;          // optional if we only have establishment_id
-  establishment_id?: string;  // optional if we have place_id
-  name: string;
-  address: string | null;
-  lat: number;
-  lng: number;
-  code?: string | null;
-  code_updated_at?: string | null;
-};
-
+// Vanilla Leaflet map (no react-leaflet)
 const MapView = dynamic(() => import("@/components/MapView"), { ssr: false });
 
 export default function Home() {
@@ -41,14 +30,15 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  // Places-based modal state
-  const [modalOpen, setModalOpen] = useState(false);
-  const [selectedPlace, setSelectedPlace] = useState<Candidate | null>(null);
+  const [quickEdit, setQuickEdit] = useState<{ id: string; name: string } | null>(null);
+  const staffToken = process.env.NEXT_PUBLIC_SUBMIT_TOKEN; // dev-only toggle for staff_verified
 
   const inFlight = useRef(false);
 
   useEffect(() => {
-    if (!("geolocation" in navigator)) setPosStatus("unavailable");
+    if (!("geolocation" in navigator)) {
+      setPosStatus("unavailable");
+    }
   }, []);
 
   const requestLocation = useCallback(() => {
@@ -80,7 +70,9 @@ export default function Home() {
         lng: String(pos.lng),
         radius_km: String(radiusKm),
       });
-      const res = await fetch(`/api/nearest?${q.toString()}`, { headers: { "cache-control": "no-store" } });
+      const res = await fetch(`/api/nearest?${q.toString()}`, {
+        headers: { "cache-control": "no-store" },
+      });
       if (!res.ok) throw new Error(`Server ${res.status}: ${await res.text()}`);
       const data = (await res.json()) as { establishments?: Establishment[] };
       setResults(data.establishments ?? []);
@@ -92,11 +84,12 @@ export default function Home() {
     }
   }, [pos, radiusKm]);
 
+  // fetch when position arrives
   useEffect(() => {
     if (pos) fetchNearest();
   }, [pos, fetchNearest]);
 
-  // Auto-resolve toast flow still works
+  // Auto-resolve building and toast
   useEffect(() => {
     if (!pos) return;
     (async () => {
@@ -112,47 +105,18 @@ export default function Home() {
             (t) => (
               <div className="text-sm">
                 <div>✍️ {data.establishment?.name || "This place"} — no code yet</div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <button
-                    className="rounded border border-slate-700 bg-slate-800 px-2 py-1 hover:bg-slate-700"
-                    onClick={() => {
-                      const base: Candidate = {
-                        place_id: data.establishment?.google_place_id ?? undefined,
-                        establishment_id: data.establishment?.id ?? undefined,
-                        name: data.establishment?.name ?? "This place",
-                        address: data.establishment?.address ?? null,
-                        lat: data.establishment?.lat ?? pos.lat,
-                        lng: data.establishment?.lng ?? pos.lng,
-                        code: data.code ?? null,
-                        code_updated_at: data.code_updated_at ?? null,
-                      };
-                      setSelectedPlace(base);
-                      setModalOpen(true);
-                      toast.dismiss(t.id);
-                    }}
-                  >
-                    Add code
-                  </button>
-
+                <div className="mt-2 flex gap-2">
                   <button
                     className="rounded border border-slate-700 bg-slate-800 px-2 py-1 hover:bg-slate-700"
                     onClick={async () => {
-                      const q2 = new URLSearchParams({ lat: String(pos!.lat), lng: String(pos!.lng), radius: "120" });
-                      const r2 = await fetch(`/api/resolve-building?${q2.toString()}`);
+                      const q2 = new URLSearchParams({
+                        lat: String(pos!.lat),
+                        lng: String(pos!.lng),
+                      });
+                      const r2 = await fetch(`/api/nearby-places?${q2.toString()}`);
                       const j = await r2.json();
 
-                      const choices: Candidate[] =
-                        j?.candidates?.map((p: any) => ({
-                          place_id: p.place_id,
-                          name: p.name,
-                          address: p.address ?? null,
-                          lat: p.lat ?? pos!.lat,
-                          lng: p.lng ?? pos!.lng,
-                          code: p.code ?? null,
-                          code_updated_at: p.code_updated_at ?? null,
-                        })) ?? [];
-
-                      if (!choices.length) {
+                      if (!j?.places?.length) {
                         toast("No other nearby places found", { id: t.id, duration: 3000 });
                         return;
                       }
@@ -162,19 +126,37 @@ export default function Home() {
                           <div className="rounded-xl border border-slate-800 bg-slate-900/95 p-3 text-sm shadow-2xl">
                             <div className="mb-2 font-medium">Pick the correct place</div>
                             <div className="flex flex-col gap-2">
-                              {choices.slice(0, 5).map((p) => (
+                              {j.places.map((p: any) => (
                                 <button
                                   key={p.place_id}
                                   className="text-left rounded border border-slate-700 bg-slate-800 px-2 py-1 hover:bg-slate-700"
-                                  onClick={() => {
-                                    setSelectedPlace(p);
-                                    setModalOpen(true);
+                                  onClick={async () => {
+                                    const q3 = new URLSearchParams({
+                                      lat: String(pos!.lat),
+                                      lng: String(pos!.lng),
+                                      place_id: p.place_id,
+                                    });
+                                    const r3 = await fetch(`/api/resolve-building?${q3.toString()}`);
+                                    const d3 = await r3.json();
+
+                                    if (d3.status === "code") {
+                                      toast.success(
+                                        `🧻 ${d3.establishment.name} — code: ${d3.code}`,
+                                        { duration: 6000 }
+                                      );
+                                    } else if (d3.status === "no_code") {
+                                      setQuickEdit({ id: d3.establishment.id, name: d3.establishment.name });
+                                      toast(`✍️ ${d3.establishment.name} — no code yet`, { duration: 4500 });
+                                    } else if (d3.status === "no_restroom") {
+                                      toast(`🚫 ${d3.establishment.name} — no restroom`, { duration: 4500 });
+                                    }
                                     toast.dismiss(tt.id);
                                     toast.dismiss(t.id);
+                                    await fetchNearest();
                                   }}
                                 >
                                   <div className="font-medium">{p.name}</div>
-                                  <div className="text-xs opacity-70">{p.address ?? "No address"}</div>
+                                  <div className="text-xs opacity-70">{p.address}</div>
                                 </button>
                               ))}
                             </div>
@@ -186,6 +168,16 @@ export default function Home() {
                   >
                     Not this place?
                   </button>
+
+                  <button
+                    className="rounded border border-slate-700 bg-slate-800 px-2 py-1 hover:bg-slate-700"
+                    onClick={() => {
+                      setQuickEdit({ id: data.establishment.id, name: data.establishment.name });
+                      toast.dismiss(t.id);
+                    }}
+                  >
+                    Update code
+                  </button>
                 </div>
               </div>
             ),
@@ -195,116 +187,10 @@ export default function Home() {
           toast(`🚫 ${data.establishment?.name || "This place"} — no restroom`, { duration: 4500 });
         }
       } catch {
-        // ignore network errors
+        // ignore
       }
     })();
   }, [pos, fetchNearest]);
-
-  // NEW: shared handler so list rows use the same flow
-  const handleUpdateClickFromRow = useCallback(
-    async (r: Establishment, posNow: { lat: number; lng: number } | null) => {
-      // If we already have a Google place_id, open directly
-      if (r.google_place_id) {
-        setSelectedPlace({
-          place_id: r.google_place_id,
-          name: r.name,
-          address: r.address,
-          lat: r.lat,
-          lng: r.lng,
-          code: r.code ?? null,
-          code_updated_at: r.code_updated_at ?? null,
-        });
-        setModalOpen(true);
-        return;
-      }
-
-      // Otherwise try resolve-building near this row
-      const lat = r.lat ?? posNow?.lat;
-      const lng = r.lng ?? posNow?.lng;
-      if (typeof lat !== "number" || typeof lng !== "number") {
-        toast.error("No coordinates for this place.");
-        return;
-      }
-
-      try {
-        const q = new URLSearchParams({ lat: String(lat), lng: String(lng), radius: "120" });
-        const res = await fetch(`/api/resolve-building?${q.toString()}`);
-        const data = await res.json();
-
-        // Fast path: establishment returned (maybe with place_id)
-        if (data?.establishment) {
-          setSelectedPlace({
-            place_id: data.establishment.google_place_id ?? undefined,
-            establishment_id: data.establishment.id ?? undefined,
-            name: data.establishment.name,
-            address: data.establishment.address ?? null,
-            lat: data.establishment.lat ?? lat,
-            lng: data.establishment.lng ?? lng,
-            code: data.code ?? null,
-            code_updated_at: data.code_updated_at ?? null,
-          });
-          setModalOpen(true);
-          return;
-        }
-
-        // Otherwise candidates list
-        const choices: Candidate[] =
-          data?.candidates?.map((p: any) => ({
-            place_id: p.place_id,
-            name: p.name,
-            address: p.address ?? null,
-            lat: p.lat ?? lat,
-            lng: p.lng ?? lng,
-            code: p.code ?? null,
-            code_updated_at: p.code_updated_at ?? null,
-          })) ?? [];
-
-        if (!choices.length) {
-          // Fallback: open modal using just the establishment_id
-          setSelectedPlace({
-            establishment_id: r.id,
-            name: r.name,
-            address: r.address ?? null,
-            lat: r.lat ?? lat,
-            lng: r.lng ?? lng,
-            code: r.code ?? null,
-            code_updated_at: r.code_updated_at ?? null,
-          });
-          setModalOpen(true);
-          return;
-        }
-
-        // If there are choices, present a quick chooser inside a toast
-        toast.custom(
-          (tt) => (
-            <div className="rounded-xl border border-slate-800 bg-slate-900/95 p-3 text-sm shadow-2xl">
-              <div className="mb-2 font-medium">Pick the correct place</div>
-              <div className="flex flex-col gap-2">
-                {choices.slice(0, 5).map((p) => (
-                  <button
-                    key={p.place_id}
-                    className="text-left rounded border border-slate-700 bg-slate-800 px-2 py-1 hover:bg-slate-700"
-                    onClick={() => {
-                      setSelectedPlace(p);
-                      setModalOpen(true);
-                      toast.dismiss(tt.id);
-                    }}
-                  >
-                    <div className="font-medium">{p.name}</div>
-                    <div className="text-xs opacity-70">{p.address ?? "No address"}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ),
-          { duration: 10000 }
-        );
-      } catch (e: any) {
-        toast.error(e?.message ?? "Could not fetch nearby candidates");
-      }
-    },
-    []
-  );
 
   const header = useMemo(
     () => (!pos ? "Share your location to begin" : `Nearest bathrooms within ${radiusKm} km`),
@@ -321,7 +207,7 @@ export default function Home() {
         />
       </Head>
 
-      <div className="min-h-[100dvh] bg-slate-950 text-slate-100">
+      <div className="min-h-screen bg-slate-950 text-slate-100">
         <div className="mx-auto max-w-3xl p-6 sm:p-8">
           <header className="mb-5">
             <h1 className="text-2xl sm:text-3xl font-bold">Bathroom Code Finder</h1>
@@ -397,13 +283,11 @@ export default function Home() {
           {/* Map */}
           {pos && (
             <div className="mt-5">
-              <div className="h-[360px] sm:h-[420px] rounded-2xl overflow-hidden border border-slate-800">
-                <MapView center={pos} places={results} />
-              </div>
+              <MapView center={pos} places={results} />
             </div>
           )}
 
-          {/* Results list */}
+          {/* Results list with empty state directly under header */}
           <section className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/60 p-4 sm:p-5">
             <h2 className="text-lg font-semibold">{header}</h2>
 
@@ -447,7 +331,7 @@ export default function Home() {
                       <div className="mt-2">
                         <button
                           className="text-sm underline underline-offset-4 opacity-80 hover:opacity-100"
-                          onClick={() => handleUpdateClickFromRow(r, pos)}
+                          onClick={() => setQuickEdit({ id: r.id, name: r.name })}
                         >
                           Update code
                         </button>
@@ -456,20 +340,75 @@ export default function Home() {
                   </div>
                 </li>
               ))}
-            </ul>
+            </ul><div className="p-4 bg-emerald-600 text-white rounded-xl">
+  Tailwind is working ✅
+</div>
+
           </section>
 
-          {/* Modal */}
-          <UpdateCodeModal
-            open={modalOpen}
-            onClose={() => setModalOpen(false)}
-            place={selectedPlace}
-            onSaved={async () => {
-              toast.success("Code updated");
-              setModalOpen(false);
-              await fetchNearest();
-            }}
-          />
+          {/* Quick-edit floating form */}
+          
+          {quickEdit && (
+            <form
+              className="fixed inset-x-0 top-20 z-50 mx-auto w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900/85 p-4 backdrop-blur-md shadow-2xl"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const form = e.currentTarget;
+                const code = (form.elements.namedItem("code") as HTMLInputElement).value.trim();
+                const staffBox = form.elements.namedItem("staff_verified") as HTMLInputElement | null;
+                if (!code) return;
+                try {
+                  const res = await fetch("/api/submit", {
+                    method: "POST",
+                    headers: {
+                      "content-type": "application/json",
+                      ...(staffToken ? { "x-submit-token": staffToken } : {}),
+                    },
+                    body: JSON.stringify({
+                      establishment_id: quickEdit.id,
+                      code,
+                      staff_verified: !!staffBox?.checked,
+                    }),
+                  });
+                  if (!res.ok) throw new Error(await res.text());
+                  toast.success("Code saved");
+                  setQuickEdit(null);
+                  await fetchNearest();
+                } catch (err) {
+                  toast.error("Submit failed — check console");
+                  console.error(err);
+                }
+              }}
+            >
+              <div className="text-sm mb-2 font-medium">Update code — {quickEdit.name}</div>
+              <input
+                name="code"
+                autoFocus
+                placeholder="Enter code"
+                className="w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100"
+              />
+              {staffToken && (
+                <label className="mt-2 flex items-center gap-2 text-xs opacity-80">
+                  <input type="checkbox" name="staff_verified" /> Staff-verified
+                </label>
+              )}
+              <div className="mt-3 flex gap-2">
+                <button
+                  className="rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 hover:bg-slate-700"
+                  type="submit"
+                >
+                  Save
+                </button>
+                <button
+                  className="rounded-xl border border-slate-800 px-4 py-2"
+                  type="button"
+                  onClick={() => setQuickEdit(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
 
           <footer className="mt-8 text-center text-xs opacity-60">
             Crowd-sourced codes. Please be respectful and follow venue policies.

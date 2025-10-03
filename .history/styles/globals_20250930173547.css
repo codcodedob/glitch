@@ -1,0 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* your custom styles below (optional) */
+:root { color-scheme: dark; }
+body { background: #0b1220; color: #e5e7eb; }

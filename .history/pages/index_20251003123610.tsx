@@ -18,8 +18,7 @@ type Establishment = {
 };
 
 type Candidate = {
-  place_id?: string;          // optional if we only have establishment_id
-  establishment_id?: string;  // optional if we have place_id
+  place_id: string;
   name: string;
   address: string | null;
   lat: number;
@@ -41,7 +40,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  // Places-based modal state
+  // Modal (Places-based add/update)
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedPlace, setSelectedPlace] = useState<Candidate | null>(null);
 
@@ -80,7 +79,9 @@ export default function Home() {
         lng: String(pos.lng),
         radius_km: String(radiusKm),
       });
-      const res = await fetch(`/api/nearest?${q.toString()}`, { headers: { "cache-control": "no-store" } });
+      const res = await fetch(`/api/nearest?${q.toString()}`, {
+        headers: { "cache-control": "no-store" },
+      });
       if (!res.ok) throw new Error(`Server ${res.status}: ${await res.text()}`);
       const data = (await res.json()) as { establishments?: Establishment[] };
       setResults(data.establishments ?? []);
@@ -96,7 +97,7 @@ export default function Home() {
     if (pos) fetchNearest();
   }, [pos, fetchNearest]);
 
-  // Auto-resolve toast flow still works
+  // Auto-resolve building & toasts; allows adding code or picking "Not this place?"
   useEffect(() => {
     if (!pos) return;
     (async () => {
@@ -108,6 +109,18 @@ export default function Home() {
         if (data.status === "code") {
           toast.success(`🧻 ${data.establishment.name} — code: ${data.code}`, { duration: 6000 });
         } else if (data.status === "no_code") {
+          const baseCand: Candidate | null = data.establishment?.google_place_id
+            ? {
+                place_id: data.establishment.google_place_id,
+                name: data.establishment.name,
+                address: data.establishment.address,
+                lat: data.establishment.lat,
+                lng: data.establishment.lng,
+                code: data.code ?? null,
+                code_updated_at: data.code_updated_at ?? null,
+              }
+            : null;
+
           toast(
             (t) => (
               <div className="text-sm">
@@ -116,19 +129,13 @@ export default function Home() {
                   <button
                     className="rounded border border-slate-700 bg-slate-800 px-2 py-1 hover:bg-slate-700"
                     onClick={() => {
-                      const base: Candidate = {
-                        place_id: data.establishment?.google_place_id ?? undefined,
-                        establishment_id: data.establishment?.id ?? undefined,
-                        name: data.establishment?.name ?? "This place",
-                        address: data.establishment?.address ?? null,
-                        lat: data.establishment?.lat ?? pos.lat,
-                        lng: data.establishment?.lng ?? pos.lng,
-                        code: data.code ?? null,
-                        code_updated_at: data.code_updated_at ?? null,
-                      };
-                      setSelectedPlace(base);
-                      setModalOpen(true);
-                      toast.dismiss(t.id);
+                      if (baseCand) {
+                        setSelectedPlace(baseCand);
+                        setModalOpen(true);
+                        toast.dismiss(t.id);
+                      } else {
+                        toast("No place_id yet—try chooser", { id: t.id, duration: 3000 });
+                      }
                     }}
                   >
                     Add code
@@ -137,7 +144,11 @@ export default function Home() {
                   <button
                     className="rounded border border-slate-700 bg-slate-800 px-2 py-1 hover:bg-slate-700"
                     onClick={async () => {
-                      const q2 = new URLSearchParams({ lat: String(pos!.lat), lng: String(pos!.lng), radius: "120" });
+                      const q2 = new URLSearchParams({
+                        lat: String(pos!.lat),
+                        lng: String(pos!.lng),
+                        radius: "120",
+                      });
                       const r2 = await fetch(`/api/resolve-building?${q2.toString()}`);
                       const j = await r2.json();
 
@@ -195,116 +206,100 @@ export default function Home() {
           toast(`🚫 ${data.establishment?.name || "This place"} — no restroom`, { duration: 4500 });
         }
       } catch {
-        // ignore network errors
+        // ignore
       }
     })();
   }, [pos, fetchNearest]);
 
-  // NEW: shared handler so list rows use the same flow
-  const handleUpdateClickFromRow = useCallback(
-    async (r: Establishment, posNow: { lat: number; lng: number } | null) => {
-      // If we already have a Google place_id, open directly
-      if (r.google_place_id) {
+  // === NEW: shared handler so list rows use the same chooser/modal flow ===
+  async function handleUpdateClickFromRow(row: Establishment, posNow: { lat: number; lng: number } | null) {
+    // If this row already has a place_id -> open modal directly
+    if (row.google_place_id) {
+      setSelectedPlace({
+        place_id: row.google_place_id,
+        name: row.name,
+        address: row.address ?? null,
+        lat: row.lat,
+        lng: row.lng,
+        code: row.code ?? null,
+        code_updated_at: row.code_updated_at ?? null,
+      });
+      setModalOpen(true);
+      return;
+    }
+
+    // Otherwise ask resolve API for candidates near the row’s coords
+    const lat = row.lat ?? posNow?.lat;
+    const lng = row.lng ?? posNow?.lng;
+    if (typeof lat !== "number" || typeof lng !== "number") {
+      toast.error("No coordinates for this place.");
+      return;
+    }
+    try {
+      const q = new URLSearchParams({ lat: String(lat), lng: String(lng), radius: "120" });
+      const r = await fetch(`/api/resolve-building?${q.toString()}`);
+      const j = await r.json();
+
+      // Fast path: a single establishment came back with place_id
+      if (j?.establishment?.google_place_id) {
         setSelectedPlace({
-          place_id: r.google_place_id,
-          name: r.name,
-          address: r.address,
-          lat: r.lat,
-          lng: r.lng,
-          code: r.code ?? null,
-          code_updated_at: r.code_updated_at ?? null,
+          place_id: j.establishment.google_place_id,
+          name: j.establishment.name,
+          address: j.establishment.address ?? null,
+          lat: j.establishment.lat,
+          lng: j.establishment.lng,
+          code: j.code ?? null,
+          code_updated_at: j.code_updated_at ?? null,
         });
         setModalOpen(true);
         return;
       }
 
-      // Otherwise try resolve-building near this row
-      const lat = r.lat ?? posNow?.lat;
-      const lng = r.lng ?? posNow?.lng;
-      if (typeof lat !== "number" || typeof lng !== "number") {
-        toast.error("No coordinates for this place.");
+      const choices: Candidate[] =
+        j?.candidates?.map((p: any) => ({
+          place_id: p.place_id,
+          name: p.name,
+          address: p.address ?? null,
+          lat: p.lat ?? lat,
+          lng: p.lng ?? lng,
+          code: p.code ?? null,
+          code_updated_at: p.code_updated_at ?? null,
+        })) ?? [];
+
+      if (!choices.length) {
+        toast("No nearby candidates found", { duration: 3000 });
         return;
       }
 
-      try {
-        const q = new URLSearchParams({ lat: String(lat), lng: String(lng), radius: "120" });
-        const res = await fetch(`/api/resolve-building?${q.toString()}`);
-        const data = await res.json();
-
-        // Fast path: establishment returned (maybe with place_id)
-        if (data?.establishment) {
-          setSelectedPlace({
-            place_id: data.establishment.google_place_id ?? undefined,
-            establishment_id: data.establishment.id ?? undefined,
-            name: data.establishment.name,
-            address: data.establishment.address ?? null,
-            lat: data.establishment.lat ?? lat,
-            lng: data.establishment.lng ?? lng,
-            code: data.code ?? null,
-            code_updated_at: data.code_updated_at ?? null,
-          });
-          setModalOpen(true);
-          return;
-        }
-
-        // Otherwise candidates list
-        const choices: Candidate[] =
-          data?.candidates?.map((p: any) => ({
-            place_id: p.place_id,
-            name: p.name,
-            address: p.address ?? null,
-            lat: p.lat ?? lat,
-            lng: p.lng ?? lng,
-            code: p.code ?? null,
-            code_updated_at: p.code_updated_at ?? null,
-          })) ?? [];
-
-        if (!choices.length) {
-          // Fallback: open modal using just the establishment_id
-          setSelectedPlace({
-            establishment_id: r.id,
-            name: r.name,
-            address: r.address ?? null,
-            lat: r.lat ?? lat,
-            lng: r.lng ?? lng,
-            code: r.code ?? null,
-            code_updated_at: r.code_updated_at ?? null,
-          });
-          setModalOpen(true);
-          return;
-        }
-
-        // If there are choices, present a quick chooser inside a toast
-        toast.custom(
-          (tt) => (
-            <div className="rounded-xl border border-slate-800 bg-slate-900/95 p-3 text-sm shadow-2xl">
-              <div className="mb-2 font-medium">Pick the correct place</div>
-              <div className="flex flex-col gap-2">
-                {choices.slice(0, 5).map((p) => (
-                  <button
-                    key={p.place_id}
-                    className="text-left rounded border border-slate-700 bg-slate-800 px-2 py-1 hover:bg-slate-700"
-                    onClick={() => {
-                      setSelectedPlace(p);
-                      setModalOpen(true);
-                      toast.dismiss(tt.id);
-                    }}
-                  >
-                    <div className="font-medium">{p.name}</div>
-                    <div className="text-xs opacity-70">{p.address ?? "No address"}</div>
-                  </button>
-                ))}
-              </div>
+      // Reuse the same chooser UI as the toast flow
+      toast.custom(
+        (tt) => (
+          <div className="rounded-xl border border-slate-800 bg-slate-900/95 p-3 text-sm shadow-2xl">
+            <div className="mb-2 font-medium">Pick the correct place</div>
+            <div className="flex flex-col gap-2">
+              {choices.slice(0, 5).map((p) => (
+                <button
+                  key={p.place_id}
+                  className="text-left rounded border border-slate-700 bg-slate-800 px-2 py-1 hover:bg-slate-700"
+                  onClick={() => {
+                    setSelectedPlace(p);
+                    setModalOpen(true);
+                    toast.dismiss(tt.id);
+                  }}
+                >
+                  <div className="font-medium">{p.name}</div>
+                  <div className="text-xs opacity-70">{p.address ?? "No address"}</div>
+                </button>
+              ))}
             </div>
-          ),
-          { duration: 10000 }
-        );
-      } catch (e: any) {
-        toast.error(e?.message ?? "Could not fetch nearby candidates");
-      }
-    },
-    []
-  );
+          </div>
+        ),
+        { duration: 10000 }
+      );
+    } catch (e: any) {
+      toast.error(e?.message ?? "Could not fetch nearby candidates");
+    }
+  }
 
   const header = useMemo(
     () => (!pos ? "Share your location to begin" : `Nearest bathrooms within ${radiusKm} km`),
@@ -447,7 +442,7 @@ export default function Home() {
                       <div className="mt-2">
                         <button
                           className="text-sm underline underline-offset-4 opacity-80 hover:opacity-100"
-                          onClick={() => handleUpdateClickFromRow(r, pos)}
+                          onClick={() => handleUpdateClickFromRow(r, pos)} // ← NEW: same flow as toast
                         >
                           Update code
                         </button>
@@ -459,7 +454,7 @@ export default function Home() {
             </ul>
           </section>
 
-          {/* Modal */}
+          {/* Modal for Places-based add/update (by place_id) */}
           <UpdateCodeModal
             open={modalOpen}
             onClose={() => setModalOpen(false)}
