@@ -43,7 +43,7 @@ export default function UpdateCodeModal({ open, onClose, place, onSaved }: Props
   if (!open || !place) return null;
 
   async function handleSave() {
-    if (!openAccess && !code.trim()) return;
+    if (!openAccess && !code.trim()) return; // must have code unless open access
     setSaving(true);
     try {
       const payload: {
