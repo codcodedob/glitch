@@ -1,4 +1,3 @@
-// components/MapView.tsx
 "use client";
 import { useEffect, useRef } from "react";
 import L from "leaflet";
@@ -21,7 +20,6 @@ type Props = {
   places: Place[];
 };
 
-// Default marker icon (CDN urls to avoid Next asset path quirks)
 const icon = L.icon({
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
   iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
@@ -55,23 +53,25 @@ export default function MapView({ center, places }: Props) {
       mapRef.current = null;
       markersRef.current = {};
     };
-  }, []); // create once
+    // create once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Recenter when center changes
+  // Recenter when center changes (fixes exhaustive-deps: depend on primitives)
   useEffect(() => {
-    if (!mapRef.current) return;
-    mapRef.current.setView([center.lat, center.lng], 16);
-  }, [center.lat, center.lng]); // ✅ include lat/lng to satisfy eslint
+    const map = mapRef.current;
+    if (!map) return;
+    map.setView([center.lat, center.lng], 16);
+  }, [center.lat, center.lng]);
 
   // Sync markers with `places`
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    const existingIds = new Set(Object.keys(markersRef.current));
+    // Remove markers no longer present
+    const existingIds = Object.keys(markersRef.current);
     const incomingIds = new Set(places.map((p) => p.id));
-
-    // Remove markers that are no longer present
     for (const id of existingIds) {
       if (!incomingIds.has(id)) {
         markersRef.current[id].remove();
@@ -81,42 +81,38 @@ export default function MapView({ center, places }: Props) {
 
     // Add/update markers
     for (const p of places) {
-      const html = `
-        <div style="min-width:180px">
-          <div style="font-weight:600">${p.name}</div>
-          <div style="opacity:.7; font-size:12px">${p.address}</div>
-          <div style="margin-top:6px; font-size:13px">
-            ${
-              p.restroom_available === false
-                ? "No restroom"
-                : p.code
-                ? `<span style="opacity:.8">Code:</span> <span style="font-family:monospace">${p.code}</span>`
-                : "No code yet"
-            }
-          </div>
-          ${
-            typeof p.distance_km === "number"
-              ? `<div style="margin-top:4px; font-size:11px; opacity:.7">${p.distance_km.toFixed(2)} km away</div>`
-              : ""
-          }
-          ${
-            p.code && p.code_updated_at
-              ? `<div style="margin-top:4px; font-size:11px; opacity:.6">Updated ${new Date(
-                  p.code_updated_at
-                ).toLocaleString()}</div>`
-              : ""
-          }
-        </div>
-      `;
-
       let m = markersRef.current[p.id];
+
+      const content =
+        `<div style="min-width:180px">` +
+        `<div style="font-weight:600">${p.name}</div>` +
+        `<div style="opacity:.7; font-size:12px">${p.address}</div>` +
+        `<div style="margin-top:6px; font-size:13px">` +
+        (p.restroom_available === false
+          ? "No restroom"
+          : p.code
+          ? `<span style="opacity:.8">Code:</span> <span style="font-family:monospace">${p.code}</span>`
+          : "No code yet") +
+        `</div>` +
+        (typeof p.distance_km === "number"
+          ? `<div style="margin-top:4px; font-size:11px; opacity:.7">${p.distance_km.toFixed(
+              2
+            )} km away</div>`
+          : "") +
+        (p.code && p.code_updated_at
+          ? `<div style="margin-top:4px; font-size:11px; opacity:.6">Updated ${new Date(
+              p.code_updated_at
+            ).toLocaleString()}</div>`
+          : "") +
+        `</div>`;
+
       if (!m) {
         m = L.marker([p.lat, p.lng], { icon }).addTo(map);
         markersRef.current[p.id] = m;
       } else {
         m.setLatLng([p.lat, p.lng]);
       }
-      m.bindPopup(html);
+      m.bindPopup(content);
     }
   }, [places]);
 
