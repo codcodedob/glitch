@@ -1,20 +1,57 @@
+@import "tailwindcss";
+
+html, body, #__next { min-height: 100%; }
+
+body { background:#0b1220; color:#e6eef8; }
+h1,h2,h3,h4 { color:#f3f7ff; }
+.small-dim, .muted, .opacity-70 { color: rgba(230,238,248,.75); }
+
+/* You can add @apply rules after this compiles once successfully */
+
+
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* your custom styles below (optional) */
-:root { color-scheme: dark; }
-body { background: #0b1220; color: #e5e7eb; }
-/* Always allow page scroll unless we explicitly lock it */
-html, body, #__next {
-    height: auto;
-    min-height: 100%;
-    overflow-y: auto;
-  }
-  
-  /* a class we can toggle to lock scroll while a modal is open */
-  .lock-scroll {
-    overflow: hidden !important;
-    height: 100%;
-  }
-  
+/* Readable dark scheme */
+html, body, #__next { min-height: 100%; }
+body { background: #0b1220; color: #e6eef8; }
+h1,h2,h3,h4 { color: #f3f7ff; }
+
+/* Cards */
+.section-card {
+  @apply rounded-2xl border shadow-xl;
+  background: rgba(17, 24, 39, .85);
+  border-color: #2a3a57;
+}
+
+/* Inputs */
+.input-dark {
+  @apply rounded-xl px-3 py-2 w-full;
+  background: #0f172a;
+  color: #e6eef8;
+  border: 1px solid #2a3a57;
+}
+.input-dark::placeholder { color: #98a6c0; }
+
+/* Buttons */
+.btn-dark {
+  @apply rounded-xl px-4 py-2 font-medium;
+  background: #1b2a44;
+  color: #e6eef8;
+  border: 1px solid #2a3a57;
+}
+.btn-dark:hover { background: #223255; }
+
+/* Leaflet popup in dark mode */
+.leaflet-container .leaflet-popup-content-wrapper {
+  background: #0f172a;
+  color: #e6eef8;
+  border: 1px solid #2a3a57;
+  border-radius: 14px;
+}
+.leaflet-container .leaflet-popup-tip {
+  background: #0f172a;
+  border: 1px solid #2a3a57;
+}

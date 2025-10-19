@@ -1,26 +1,19 @@
+// components/MapView.tsx
 "use client";
-import { useEffect, useRef } from "react";
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
 
-type Place = {
-  id: string;
-  name: string;
-  address: string;
-  lat: number;
-  lng: number;
-  restroom_available: boolean | null;
-  code?: string | null;
-  distance_km?: number;
-  code_updated_at?: string | null;
-};
+import { useEffect, useRef } from "react";
+import * as L from "leaflet";
+import "leaflet/dist/leaflet.css";
+import type { Establishment } from "@/pages/index";
 
 type Props = {
   center: { lat: number; lng: number };
-  places: Place[];
+  places: Establishment[];
+  onUpdateRequested?: (placeId: string) => void;
 };
 
 const icon = L.icon({
+  // Use CDN so you don’t get 404s in prod
   iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
   iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
@@ -30,91 +23,134 @@ const icon = L.icon({
   shadowSize: [41, 41],
 });
 
-export default function MapView({ center, places }: Props) {
+export default function MapView({ center, places, onUpdateRequested }: Props) {
   const mapEl = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<Record<string, L.Marker>>({});
 
-  // Create map once
+  // init map (once)
   useEffect(() => {
-    if (!mapEl.current || mapRef.current) return;
+    if (!mapEl.current) return;
 
-    const map = L.map(mapEl.current, { zoomControl: true, attributionControl: true })
-      .setView([center.lat, center.lng], 16);
+    // Guard against double-init (can happen under HMR)
+    if (mapRef.current) {
+      mapRef.current.remove();
+      mapRef.current = null;
+    }
+
+    const map = L.map(mapEl.current, {
+      zoomControl: true,
+      attributionControl: true,
+    }).setView([center.lat, center.lng], 16);
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: "© OpenStreetMap contributors",
+      attribution: "© OpenStreetMap",
     }).addTo(map);
 
     mapRef.current = map;
 
     return () => {
-      map.remove();
+      try {
+        Object.values(markersRef.current).forEach((m) => m.remove());
+        markersRef.current = {};
+        map.remove();
+      } catch {
+        /* noop */
+      }
       mapRef.current = null;
-      markersRef.current = {};
     };
-    // create once on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, []); // create once
 
-  // Recenter when center changes (fixes exhaustive-deps: depend on primitives)
+  // recenter when center changes
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    map.setView([center.lat, center.lng], 16);
+    if (!mapRef.current) return;
+    mapRef.current.setView([center.lat, center.lng], 16);
   }, [center.lat, center.lng]);
 
-  // Sync markers with `places`
+  // sync markers with places
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    // Remove markers no longer present
-    const existingIds = Object.keys(markersRef.current);
-    const incomingIds = new Set(places.map((p) => p.id));
-    for (const id of existingIds) {
-      if (!incomingIds.has(id)) {
-        markersRef.current[id].remove();
-        delete markersRef.current[id];
+    // remove stale markers
+    const incoming = new Set(places.map((p) => p.google_place_id || p.id));
+    Object.keys(markersRef.current).forEach((key) => {
+      if (!incoming.has(key)) {
+        markersRef.current[key].remove();
+        delete markersRef.current[key];
       }
-    }
+    });
 
-    // Add/update markers
-    for (const p of places) {
-      let m = markersRef.current[p.id];
+    // add/update markers
+    places.forEach((p) => {
+      const key = p.google_place_id || p.id;
+      let m = markersRef.current[key];
 
-      const content =
-        `<div style="min-width:180px">` +
-        `<div style="font-weight:600">${p.name}</div>` +
-        `<div style="opacity:.7; font-size:12px">${p.address}</div>` +
-        `<div style="margin-top:6px; font-size:13px">` +
-        (p.restroom_available === false
+      const codeHtml =
+        p.restroom_available === false
           ? "No restroom"
           : p.code
-          ? `<span style="opacity:.8">Code:</span> <span style="font-family:monospace">${p.code}</span>`
-          : "No code yet") +
-        `</div>` +
-        (typeof p.distance_km === "number"
-          ? `<div style="margin-top:4px; font-size:11px; opacity:.7">${p.distance_km.toFixed(
-              2
-            )} km away</div>`
-          : "") +
-        (p.code && p.code_updated_at
-          ? `<div style="margin-top:4px; font-size:11px; opacity:.6">Updated ${new Date(
-              p.code_updated_at
-            ).toLocaleString()}</div>`
-          : "") +
-        `</div>`;
+          ? '<span style="opacity:.8">Code:</span> <span style="font-family:monospace">' +
+            p.code +
+            "</span>"
+          : "Customer access — no code yet";
+
+      const btn =
+        '<div style="margin-top:8px">' +
+        '<button data-place="' +
+        (p.google_place_id || p.id) +
+        '" style="cursor:pointer; padding:6px 10px; background:#1f2937; color:#e6eef8; border:1px solid #334155; border-radius:8px;">' +
+        (p.code ? "Update code" : "Add code") +
+        "</button>" +
+        "</div>";
+
+      const html =
+        '<div style="min-width:200px">' +
+        '<div style="font-weight:600">' +
+        p.name +
+        "</div>" +
+        '<div style="opacity:.75; font-size:12px">' +
+        (p.address || "") +
+        "</div>" +
+        '<div style="margin-top:6px; font-size:13px">' +
+        codeHtml +
+        "</div>" +
+        btn +
+        "</div>";
 
       if (!m) {
         m = L.marker([p.lat, p.lng], { icon }).addTo(map);
-        markersRef.current[p.id] = m;
+        markersRef.current[key] = m;
       } else {
         m.setLatLng([p.lat, p.lng]);
       }
-      m.bindPopup(content);
-    }
-  }, [places]);
+      m.bindPopup(html);
 
-  return <div ref={mapEl} className="h-[380px] w-full overflow-hidden rounded-2xl border border-slate-800" />;
+      m.off("popupopen");
+      m.on("popupopen", () => {
+        const popup = m.getPopup();
+        if (!popup) return;
+        const node = popup.getElement();
+        if (!node) return;
+
+        const el = node.querySelector('button[data-place]');
+        if (el && onUpdateRequested) {
+          el.addEventListener("click", () => {
+            const pid = (el as HTMLButtonElement).getAttribute("data-place");
+            if (pid) onUpdateRequested(pid);
+          });
+        }
+      });
+    });
+  }, [places, onUpdateRequested]);
+
+  return (
+    <div
+      ref={mapEl}
+      className="h-full w-full overflow-hidden rounded-2xl border border-slate-800"
+      // keep the map behind modals by default
+      style={{ zIndex: 0 }}
+    />
+  );
 }

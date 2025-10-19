@@ -9,32 +9,24 @@ type Establishment = {
   lat: number;
   lng: number;
   restroom_available: boolean | null;
-  code: string | null;
-  code_updated_at: string | null;
   google_place_id: string | null;
   distance_km?: number;
+  code?: string | null;
+  code_updated_at?: string | null;
 };
 
-type EstablishmentRow = Omit<Establishment, "distance_km">;
+const SUPABASE_URL =
+  process.env.SUPABASE_URL ||
+  process.env.NEXT_PUBLIC_SUPABASE_URL ||
+  "";
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
-type GoogleNearbyPlace = {
-  place_id: string;
-  name: string;
-  vicinity?: string;
-  formatted_address?: string;
-  geometry?: { location?: { lat?: number; lng?: number } };
-};
-
-type GoogleNearbyResponse = {
-  results?: GoogleNearbyPlace[];
-  status: string;
-  error_message?: string;
-};
-
-const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY ?? "";
-const SUPABASE_URL = process.env.SUPABASE_URL ?? "";
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? ""; // server-only
-const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+function getServiceSupabase(): SupabaseClient {
+  if (!SUPABASE_URL || !SERVICE_KEY) {
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  }
+  return createClient(SUPABASE_URL, SERVICE_KEY);
+}
 
 function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number) {
   const R = 6371;
@@ -61,110 +53,99 @@ export default async function handler(
   if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(radius_km)) {
     return res.status(400).json({ error: "Invalid lat/lng/radius_km" });
   }
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    return res.status(500).json({ error: "Missing Supabase server env" });
-  }
-  if (!GOOGLE_KEY) {
-    // We can still return Supabase-only results if present
-    console.warn("Missing GOOGLE_MAPS_API_KEY; nearest will not backfill from Google.");
-  }
 
-  // 1) Pull from Supabase view/table first
-  const { data: rows, error } = await supabase
-    .from("establishments_view") // or "establishments" if you don't have the view
-    .select("*");
-
-  if (error) {
-    console.error(error);
-    return res.status(500).json({ error: error.message });
+  let supabase: SupabaseClient;
+  try {
+    supabase = getServiceSupabase();
+  } catch (e) {
+    console.error("nearest: env error:", e);
+    return res.status(500).json({ error: "Server misconfigured (Supabase env)" });
   }
 
-  const sourceRows: EstablishmentRow[] = Array.isArray(rows) ? (rows as EstablishmentRow[]) : [];
-
-  // Filter in-memory by radius and sort
-  let nearby: Establishment[] = sourceRows
-    .map((r) => {
-      const d = haversineKm(lat, lng, r.lat, r.lng);
-      return { ...r, distance_km: d } as Establishment;
-    })
-    .filter((r) => (r.distance_km ?? Infinity) <= radius_km)
-    .sort((a, b) => (a.distance_km! - b.distance_km!));
-
-  // 2) If too few results, backfill from Google Places and upsert to Supabase
-  const MIN_RESULTS = 6;
-  if (nearby.length < MIN_RESULTS && GOOGLE_KEY) {
-    try {
-      const url = new URL("https://maps.googleapis.com/maps/api/place/nearbysearch/json");
-      url.searchParams.set("location", `${lat},${lng}`);
-      url.searchParams.set("radius", String(Math.max(50, Math.round(radius_km * 1000))));
-      url.searchParams.set("type", "establishment");
-      url.searchParams.set("key", GOOGLE_KEY);
-
-      const resp = await fetch(url.toString());
-      if (!resp.ok) throw new Error(`Google Places error ${resp.status}`);
-      const g: unknown = await resp.json();
-      const data = g as GoogleNearbyResponse;
-
-      const places: GoogleNearbyPlace[] = Array.isArray(data.results) ? data.results : [];
-
-      // Upsert any new places
-      for (const p of places) {
-        const placeId = p.place_id;
-        const name = p.name ?? "Unknown place";
-        const address = p.vicinity ?? p.formatted_address ?? name;
-        const loc = p.geometry?.location;
-        const plat = Number(loc?.lat ?? lat);
-        const plng = Number(loc?.lng ?? lng);
-
-        if (!placeId) continue;
-
-        const { error: upErr } = await supabase
-          .from("establishments")
-          .upsert(
-            {
-              google_place_id: placeId,
-              name,
-              address,
-              lat: plat,
-              lng: plng,
-            },
-            { onConflict: "google_place_id" }
-          );
-
-        if (upErr) {
-          // Non-fatal: just log and continue
-          console.warn("Upsert failed for place", placeId, upErr.message);
-        }
-      }
-
-      // Re-read and recompute “nearby”
-      const { data: rows2, error: err2 } = await supabase.from("establishments_view").select("*");
-      if (!err2 && Array.isArray(rows2)) {
-        const sourceRows2 = rows2 as EstablishmentRow[];
-        nearby = sourceRows2
-          .map((r) => {
-            const d = haversineKm(lat, lng, r.lat, r.lng);
-            return { ...r, distance_km: d } as Establishment;
-          })
-          .filter((r) => (r.distance_km ?? Infinity) <= radius_km)
-          .sort((a, b) => (a.distance_km! - b.distance_km!));
-      }
-    } catch (e: unknown) {
-      const err = e as Error;
-      console.error("Google backfill failed:", err.message || err);
+  try {
+    // ---------- Path A: use the old view if it exists ----------
+    const tryView = await supabase.from("establishments_view").select("*");
+    if (!tryView.error && Array.isArray(tryView.data)) {
+      const rows = tryView.data as any[];
+      const nearbyFromView: Establishment[] = rows
+        .map((r) => ({
+          id: r.id,
+          name: r.name,
+          address: r.address,
+          lat: r.lat,
+          lng: r.lng,
+          restroom_available: r.restroom_available ?? null,
+          google_place_id: r.google_place_id ?? null,
+          code: r.code ?? null,
+          code_updated_at: r.code_updated_at ?? null,
+          distance_km: haversineKm(lat, lng, r.lat, r.lng),
+        }))
+        .filter((r) => (r.distance_km ?? Infinity) <= radius_km)
+        .sort((a, b) => (a.distance_km! - b.distance_km!))
+        .slice(0, 50);
+      return res.status(200).json({ establishments: nearbyFromView });
     }
-  }
 
-  // 3) Return (de-dup + cap)
-  const seen = new Set<string>();
-  const deduped: Establishment[] = [];
-  for (const r of nearby) {
-    const key = r.google_place_id || r.id;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(r);
-    if (deduped.length >= 25) break;
-  }
+    // If the view errors because it doesn't exist, log it and fall back.
+    if (tryView.error) {
+      console.warn("nearest: establishments_view not used:", tryView.error.message);
+    }
 
-  return res.status(200).json({ establishments: deduped });
+    // ---------- Path B: establishments + latest codes ----------
+    const est = await supabase
+      .from("establishments")
+      .select("id,name,address,lat,lng,restroom_available,google_place_id");
+
+    if (est.error) {
+      console.error("nearest: establishments error:", est.error.message);
+      return res.status(500).json({ error: "Failed to read establishments" });
+    }
+
+    const all = Array.isArray(est.data) ? est.data : [];
+    const nearby = all
+      .map((r) => ({
+        ...r,
+        distance_km: haversineKm(lat, lng, r.lat, r.lng),
+      }))
+      .filter((r) => (r.distance_km ?? Infinity) <= radius_km)
+      .sort((a, b) => (a.distance_km! - b.distance_km!))
+      .slice(0, 50) as Establishment[];
+
+    // fetch latest code per establishment in a single pass
+    if (nearby.length > 0) {
+      const ids = nearby.map((r) => r.id);
+      const codes = await supabase
+        .from("bathroom_codes")
+        .select("establishment_id, code, created_at")
+        .in("establishment_id", ids)
+        .order("created_at", { ascending: false });
+
+      if (codes.error) {
+        // non-fatal: log and still return nearby without codes
+        console.warn("nearest: bathroom_codes read error:", codes.error.message);
+      } else if (Array.isArray(codes.data)) {
+        const latest = new Map<string, { code: string; created_at: string }>();
+        for (const row of codes.data) {
+          if (!latest.has(row.establishment_id)) {
+            latest.set(row.establishment_id, {
+              code: row.code,
+              created_at: row.created_at,
+            });
+          }
+        }
+        nearby.forEach((r) => {
+          const l = latest.get(r.id);
+          if (l) {
+            r.code = l.code;
+            r.code_updated_at = l.created_at;
+          }
+        });
+      }
+    }
+
+    return res.status(200).json({ establishments: nearby });
+  } catch (e) {
+    console.error("nearest: unexpected error:", e);
+    return res.status(500).json({ error: "Unexpected server error" });
+  }
 }

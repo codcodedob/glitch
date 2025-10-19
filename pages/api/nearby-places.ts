@@ -1,126 +1,175 @@
-// pages/api/nearby-places.ts
+// pages/api/resolve-building.ts
 import type { NextApiRequest, NextApiResponse } from "next";
+import { createClient } from "@supabase/supabase-js";
 
-const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY ?? "";
-
-/** Minimal shape we need from Google Places Nearby Search */
-type GoogleNearbyPlace = {
-  place_id: string;
+type ResolveEst = {
+  id: string;
   name: string;
-  vicinity?: string;
-  formatted_address?: string;
-  geometry?: { location: { lat: number; lng: number } };
+  address: string | null;
+  lat: number;
+  lng: number;
+  google_place_id?: string | null;
 };
 
-type GoogleNearbyResponse = {
-  results: GoogleNearbyPlace[];
-  status: string;
-  error_message?: string;
+type Candidate = {
+  place_id: string | null;
+  name: string;
+  address?: string | null;
+  lat?: number;
+  lng?: number;
+  code?: string | null;
+  code_updated_at?: string | null;
+  code_staff_verified?: boolean | null;
 };
 
-/** What we return to the client */
-export type NearbyPlacesApiResponse =
-  | { status: "ok"; places: Array<{ place_id: string; name: string; address: string; lat: number; lng: number }> }
-  | { status: "error"; error: string };
+type Resp =
+  | {
+      status: "code";
+      establishment: ResolveEst;
+      code: string;
+      code_updated_at?: string | null;
+      code_staff_verified?: boolean | null;
+      code_reports_24h?: number;
+      candidates?: Candidate[];
+    }
+  | {
+      status: "no_code" | "no_restroom" | "not_found" | "error";
+      error?: string;
+      establishment?: ResolveEst;
+      candidates?: Candidate[];
+    };
 
-function isFiniteNumber(n: unknown): n is number {
-  return typeof n === "number" && Number.isFinite(n);
+function haversineMeters(aLat: number, aLng: number, bLat: number, bLng: number) {
+  const R = 6371000;
+  const dLat = (Math.PI / 180) * (bLat - aLat);
+  const dLng = (Math.PI / 180) * (bLng - aLng);
+  const la1 = (Math.PI / 180) * aLat;
+  const la2 = (Math.PI / 180) * bLat;
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
 }
 
-function coerceNumber(value: string | string[] | undefined): number | null {
-  if (typeof value !== "string") return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function toAddress(p: GoogleNearbyPlace): string {
-  return p.vicinity ?? p.formatted_address ?? "";
-}
-
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse<NearbyPlacesApiResponse>
-) {
-  if (req.method !== "GET") {
-    return res.status(405).json({ status: "error", error: "Method not allowed" });
-  }
-
-  if (!GOOGLE_KEY) {
-    return res.status(500).json({ status: "error", error: "Missing GOOGLE_MAPS_API_KEY" });
-  }
-
-  // required: lat/lng
-  const lat = coerceNumber(req.query.lat);
-  const lng = coerceNumber(req.query.lng);
-  if (!isFiniteNumber(lat) || !isFiniteNumber(lng)) {
-    return res.status(400).json({ status: "error", error: "Invalid or missing lat/lng" });
-  }
-
-  // optional: radius (meters), keyword, type, limit
-  const radiusMeters = (() => {
-    const n = coerceNumber(req.query.radius);
-    // default to ~120m (tight building/corner resolution)
-    if (!isFiniteNumber(n)) return 120;
-    // clamp 20m..1500m to avoid overly large queries
-    return Math.max(20, Math.min(1500, n));
-  })();
-
-  const keyword = typeof req.query.keyword === "string" ? req.query.keyword : undefined;
-  const gType = typeof req.query.type === "string" ? req.query.type : "establishment";
-  const limit = (() => {
-    const n = coerceNumber(req.query.limit);
-    if (!isFiniteNumber(n)) return 5;
-    return Math.max(1, Math.min(10, n));
-  })();
+export default async function handler(req: NextApiRequest, res: NextApiResponse<Resp>) {
+  if (req.method !== "GET") return res.status(405).json({ status: "error", error: "Method not allowed" });
 
   try {
-    const url = new URL("https://maps.googleapis.com/maps/api/place/nearbysearch/json");
-    url.searchParams.set("location", `${lat},${lng}`);
-    url.searchParams.set("radius", String(radiusMeters));
-    url.searchParams.set("type", gType);
-    if (keyword) url.searchParams.set("keyword", keyword);
-    url.searchParams.set("key", GOOGLE_KEY);
+    const lat = parseFloat(String(req.query.lat ?? ""));
+    const lng = parseFloat(String(req.query.lng ?? ""));
+    const radiusMeters = parseFloat(String(req.query.radius ?? "120"));
+    if (Number.isNaN(lat) || Number.isNaN(lng)) return res.status(400).json({ status: "error", error: "Missing lat/lng" });
 
-    const resp = await fetch(url.toString());
-    if (!resp.ok) {
-      return res
-        .status(502)
-        .json({ status: "error", error: `Google Places error ${resp.status}` });
+    const url = process.env.SUPABASE_URL!;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!; // server only
+    if (!url || !serviceKey) return res.status(500).json({ status: "error", error: "Server misconfigured" });
+    const supabase = createClient(url, serviceKey);
+
+    // Pull a small set (you could filter at SQL with a geo index if you have one)
+    const { data: rows, error } = await supabase
+      .from("establishments_view")
+      .select("*");
+    if (error) throw error;
+
+    const arr = Array.isArray(rows) ? rows : [];
+    if (!arr.length) return res.status(200).json({ status: "not_found", candidates: [] });
+
+    // compute distance + find closest
+    const withDist = arr.map((r: any) => ({
+      ...r,
+      _dist_m: haversineMeters(lat, lng, r.lat, r.lng),
+    }));
+    withDist.sort((a, b) => a._dist_m - b._dist_m);
+
+    const closest = withDist[0];
+    if (!closest || closest._dist_m > radiusMeters) {
+      // provide top 5 as “candidates”
+      const candidates: Candidate[] = withDist.slice(0, 5).map((r: any) => ({
+        place_id: r.google_place_id ?? null,
+        name: r.name,
+        address: r.address ?? null,
+        lat: r.lat,
+        lng: r.lng,
+        code: r.code ?? null,
+        code_updated_at: r.code_updated_at ?? null,
+        code_staff_verified: r.code_staff_verified ?? null,
+      }));
+      return res.status(200).json({ status: "not_found", candidates });
     }
 
-    const data: unknown = await resp.json();
-    // Narrow the type carefully
-    const g = data as GoogleNearbyResponse;
+    const establishment: ResolveEst = {
+      id: closest.id,
+      name: closest.name,
+      address: closest.address ?? null,
+      lat: closest.lat,
+      lng: closest.lng,
+      google_place_id: closest.google_place_id ?? null,
+    };
 
-    if (!g || !Array.isArray(g.results)) {
-      return res
-        .status(502)
-        .json({ status: "error", error: "Unexpected response from Google Places" });
+    // Count 24h reports for this establishment
+    const sinceIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: repRows, error: repErr } = await supabase
+      .from("code_issue_reports")
+      .select("id")
+      .eq("establishment_id", closest.id)
+      .gte("created_at", sinceIso);
+    if (repErr) throw repErr;
+
+    // Decide status
+    if (closest.restroom_available === false) {
+      return res.status(200).json({
+        status: "no_restroom",
+        establishment,
+        candidates: withDist.slice(1, 6).map((r: any) => ({
+          place_id: r.google_place_id ?? null,
+          name: r.name,
+          address: r.address ?? null,
+          lat: r.lat,
+          lng: r.lng,
+          code: r.code ?? null,
+          code_updated_at: r.code_updated_at ?? null,
+          code_staff_verified: r.code_staff_verified ?? null,
+        })),
+      });
     }
 
-    if (g.status !== "OK" && g.status !== "ZERO_RESULTS") {
-      const msg = g.error_message ? `: ${g.error_message}` : "";
-      return res
-        .status(502)
-        .json({ status: "error", error: `Google Places status ${g.status}${msg}` });
+    if (closest.code) {
+      return res.status(200).json({
+        status: "code",
+        establishment,
+        code: closest.code,
+        code_updated_at: closest.code_updated_at ?? null,
+        code_staff_verified: closest.code_staff_verified ?? null,
+        code_reports_24h: (repRows ?? []).length,
+        candidates: withDist.slice(1, 6).map((r: any) => ({
+          place_id: r.google_place_id ?? null,
+          name: r.name,
+          address: r.address ?? null,
+          lat: r.lat,
+          lng: r.lng,
+          code: r.code ?? null,
+          code_updated_at: r.code_updated_at ?? null,
+          code_staff_verified: r.code_staff_verified ?? null,
+        })),
+      });
     }
 
-    const places = g.results.slice(0, limit).map((p) => {
-      const loc = p.geometry?.location ?? { lat, lng };
-      return {
-        place_id: p.place_id,
-        name: p.name,
-        address: toAddress(p) || "Address unavailable",
-        lat: loc.lat,
-        lng: loc.lng,
-      };
+    return res.status(200).json({
+      status: "no_code",
+      establishment,
+      candidates: withDist.slice(1, 6).map((r: any) => ({
+        place_id: r.google_place_id ?? null,
+        name: r.name,
+        address: r.address ?? null,
+        lat: r.lat,
+        lng: r.lng,
+        code: r.code ?? null,
+        code_updated_at: r.code_updated_at ?? null,
+        code_staff_verified: r.code_staff_verified ?? null,
+      })),
     });
-
-    return res.status(200).json({ status: "ok", places });
-  } catch (e: unknown) {
-    const err = e as Error;
-    return res
-      .status(500)
-      .json({ status: "error", error: err.message || "Failed to fetch nearby places" });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Resolve failed";
+    return res.status(200).json({ status: "error", error: msg });
   }
 }
